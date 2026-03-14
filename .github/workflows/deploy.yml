@@ -1,0 +1,78 @@
+name: Build and Deploy to cPanel via FTP
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+
+      - name: Build
+        run: npx vite build
+
+      - name: Detect build directory
+        id: detect-dir
+        run: |
+          if [ -d "dist" ]; then
+            echo "BUILD_DIR=dist" >> $GITHUB_ENV
+          elif [ -d "out" ]; then
+            echo "BUILD_DIR=out" >> $GITHUB_ENV
+          elif [ -d "build" ]; then
+            echo "BUILD_DIR=build" >> $GITHUB_ENV
+          else
+            echo "No build directory found (dist/, out/, build/)."
+            exit 1
+          fi
+
+      - name: Validate and fix build
+        run: |
+          echo "BUILD_DIR=$BUILD_DIR"
+          test -f "$BUILD_DIR/index.html" || (echo "ERROR: index.html not found in $BUILD_DIR" && exit 1)
+
+          if grep -qE 'src="/src/|src="[.]/src/|href="/src/' "$BUILD_DIR/index.html"; then
+            echo "ERROR: index.html references /src - this is source code, not a build."
+            exit 1
+          fi
+
+          if [ "$BUILD_DIR" = "dist" ]; then
+            test -d "$BUILD_DIR/assets" || (echo "ERROR: dist/assets not found. Vite build incomplete." && exit 1)
+          fi
+
+          # Auto-fix absolute paths to relative (needed for cPanel subdirectory hosting)
+          if grep -qE 'src="/assets/|href="/assets/' "$BUILD_DIR/index.html"; then
+            echo "Fixing absolute /assets/ paths to relative ./assets/ ..."
+            sed -i 's|src="/assets/|src="./assets/|g' "$BUILD_DIR/index.html"
+            sed -i 's|href="/assets/|href="./assets/|g' "$BUILD_DIR/index.html"
+            echo "Fixed successfully."
+          fi
+
+      - name: Deploy via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          port: 21
+          local-dir: ${{ env.BUILD_DIR }}/
+          server-dir: /
+          dangerous-clean-slate: true
+          exclude: |
+            **/.git*
+            **/.github/**
+            **/node_modules/**
+            **/*.map
